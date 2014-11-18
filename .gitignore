@@ -1,0 +1,8 @@
+*.py[co]
+.DS_Store
+.idea
+*.egg*
+build
+dist
+MANIFEST
+htmlcov
