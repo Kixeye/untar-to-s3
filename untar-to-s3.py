@@ -17,7 +17,7 @@ For usage overview::
     python untar-to-s3.py -h
 
 Example::
-    export AWS_ACCESS_KEY_ID=<iam account with PubObject permission>
+    export AWS_ACCESS_KEY_ID=<iam account with PutObject permission>
     export AWS_SECRET_ACCESS_KEY=<secret from above account>
     python untar-to-s3.py web-assets-1.2.23.tar.gz --bucket my-bucket-name --prefix production
 
@@ -160,7 +160,7 @@ def deploy_tarball_to_s3(tarball_obj, bucket_name, prefix='', region='us-west-2'
                     # Read file data from the tarball
                     fd = tarball.extractfile(member)
 
-                    # Send a job to the process pool.
+                    # Send a job to the pool.
                     pool.wait_available()
                     pool.apply_async(__deploy_asset_to_s3, (fd.read(), path, member.size, bucket, not no_compress))
 
