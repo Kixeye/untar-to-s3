@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """
 Utility script for efficiently unpacking a tarball to an S3 bucket.
 
@@ -47,7 +48,6 @@ import mimetypes
 import tarfile
 import logging
 import gzip
-import signal
 import argparse
 import io
 
@@ -122,7 +122,7 @@ def __deploy_asset_to_s3(data, path, size, bucket, compress=True):
     return headers['Content-Length']
 
 
-def deploy_tarball_to_s3(tarball_obj, bucket_name, prefix='', region='us-west-2', concurrency=50, no_compress=False):
+def deploy_tarball_to_s3(tarball_obj, bucket_name, prefix='', region='us-west-2', concurrency=50, no_compress=False, strip_components=0):
     """
     Upload the contents of `tarball_obj`, a File-like object representing a valid .tar.gz file, to the S3 bucket `bucket_name`
     """
@@ -155,7 +155,12 @@ def deploy_tarball_to_s3(tarball_obj, bucket_name, prefix='', region='us-west-2'
                     if not member.isfile():
                         continue
 
-                    path = os.path.join(prefix, member.name)
+                    # Mimic the behaviour of tar -x --strip-components=
+                    stripped_name = member.name.split('/')[strip_components:]
+                    if not bool(stripped_name):
+                        continue
+
+                    path = os.path.join(prefix, '/'.join(stripped_name))
 
                     # Read file data from the tarball
                     fd = tarball.extractfile(member)
@@ -193,6 +198,8 @@ def main():
     parser.add_argument("--debug", action="store_true", help="show verbose debug output")
     parser.add_argument("--no-compress", action="store_true",
                         help="disable gzip compression of known file types")
+    parser.add_argument("--strip-components", dest="strip_components", type=int, default=0,
+                        help="Remove the specified number of leading path elements. Pathnames with fewer elements will be silently skipped. Default=0")
     parser.add_argument("filename", type=str, help="File to load")
 
     args = parser.parse_args()
@@ -203,7 +210,7 @@ def main():
         logging.basicConfig(level=logging.INFO)
 
     with open(args.filename) as fd:
-        deploy_tarball_to_s3(fd, args.bucket, args.prefix, args.region, args.concurrency, args.no_compress)
+        deploy_tarball_to_s3(fd, args.bucket, args.prefix, args.region, args.concurrency, args.no_compress, args.strip_components)
 
 
 if __name__ == "__main__":
