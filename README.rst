@@ -10,8 +10,8 @@ prefix.
 The script will automatically gzip certain file types, and will add a 'Cache-Control' header.
 
 Requirements::
-    Python 2.7
-    boto library (to install: sudo pip install boto)
+    Python 2.7 and above
+    boto3 library (to install: sudo pip install boto3)
 
 Recommended::
     gevent library to parallelize uploads to S3 (to install: sudo pip install gevent)

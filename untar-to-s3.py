@@ -8,11 +8,8 @@ prefix.
 The script will automatically gzip certain file types, and will add a 'Cache-Control' header.
 
 Requirements:
-    Python 2.7
-    boto library (to install: sudo pip install boto)
-
-Recommended:
-    gevent library to parallelize uploads to S3 (to install: sudo pip install gevent)
+    Python 2.7+
+    boto3 library (to install: sudo pip install boto3)
 
 For usage overview::
     python untar-to-s3.py -h
@@ -25,23 +22,7 @@ Example::
 """
 from __future__ import print_function
 
-# Gevent is an asynchronous IO library. It needs to be imported first.
-try:
-    import gevent
-    from gevent import monkey; monkey.patch_all()
-    from gevent.pool import Pool
-except ImportError:
-    class Pool:
-        """Stub implementation of gevent.pool.Pool"""
-        def __init__(self, *args, **kwargs):
-            pass
-        def wait_available(self):
-            pass
-        def join(self):
-            pass
-        def apply_async(self, callable, args, **kwargs):
-            callable(*args, **kwargs)
-
+import threading
 import os
 import sys
 import mimetypes
@@ -50,15 +31,10 @@ import logging
 import gzip
 import argparse
 import io
+from multiprocessing.pool import ThreadPool
 
-# TODO: Use boto3 once it is ready for production
-import boto
-from boto.s3 import connect_to_region
-from boto.s3.key import Key
-
-# Disable boto's debug logging. It's not helpful.
-logger1 = logging.getLogger('boto')
-logger1.setLevel("INFO")
+import boto3
+s3 = boto3.resource('s3')
 
 # Files of these types will be gzipped before being uploaded to S3 (unless disabled with --no-compress)
 # This list comes from MaxCDN's Gzip compression settings.
@@ -83,35 +59,35 @@ COMPRESSIBLE_FILE_TYPES = ("text/plain",
 )
 
 
-def __deploy_asset_to_s3(data, path, size, bucket, compress=True):
+def __deploy_asset_to_s3(data, path, size, bucket_name, compress=True):
     """
     Deploy a single asset file to an S3 bucket
     """
 
     try:
-        headers = {
-            'Content-Type': mimetypes.guess_type(path)[0],
-            'Cache-Control': "public, max-age=31536000",
-            'Content-Length': size,
+        kwargs = {
+            'ContentType': mimetypes.guess_type(path)[0] or 'application/octet-stream',
+            'CacheControl': "public, max-age=31536000",
+            'ContentLength': size,
+            'StorageClass': 'STANDARD',
+            'ACL': 'public-read',
         }
 
         # gzip the file if appropriate
-        if mimetypes.guess_type(path)[0] in COMPRESSIBLE_FILE_TYPES and compress:
+        if kwargs['ContentType'] in COMPRESSIBLE_FILE_TYPES and compress:
             new_buffer = io.BytesIO()
             gz_fd = gzip.GzipFile(compresslevel=9, mode="wb", fileobj=new_buffer)
             gz_fd.write(data)
             gz_fd.close()
 
-            headers['Content-Encoding'] = 'gzip'
-            headers['Content-Length'] = new_buffer.tell()
+            kwargs['ContentEncoding'] = 'gzip'
+            kwargs['ContentLength'] = new_buffer.tell()
 
             new_buffer.seek(0)
             data = new_buffer.read()
 
-        logging.debug("Uploading %s (%s bytes)" % (path, headers['Content-Length']))
-        key = bucket.new_key(path)
-        key.set_contents_from_string(data, headers=headers, policy='public-read', replace=True,
-                                     reduced_redundancy=False)
+        logging.debug("Uploading %s (%s bytes)" % (path, kwargs['ContentLength']))
+        s3.Object(bucket_name, path).put(Body=data, **kwargs)
 
     except Exception as e:
         import traceback
@@ -119,7 +95,7 @@ def __deploy_asset_to_s3(data, path, size, bucket, compress=True):
         return 0
 
     # Return number of bytes uploaded.
-    return headers['Content-Length']
+    return kwargs['ContentLength']
 
 
 def deploy_tarball_to_s3(tarball_obj, bucket_name, prefix='', region='us-west-2', concurrency=50, no_compress=False, strip_components=0):
@@ -127,14 +103,16 @@ def deploy_tarball_to_s3(tarball_obj, bucket_name, prefix='', region='us-west-2'
     Upload the contents of `tarball_obj`, a File-like object representing a valid .tar.gz file, to the S3 bucket `bucket_name`
     """
     # Connect to S3 and get a reference to the bucket name we will push files to
-    conn = connect_to_region(region)
+    conn = boto3.client('s3', region)
     if conn is None:
         logging.error("Invalid AWS region %s" % region)
         return
 
+    # Ensure bucket exists before continuing
+    from botocore.client import ClientError
     try:
-        bucket = conn.get_bucket(bucket_name, validate=True)
-    except boto.exception.S3ResponseError:
+        s3.meta.client.head_bucket(Bucket=bucket_name)
+    except ClientError:
         logging.error("S3 bucket %s does not exist in region %s" % (bucket_name, region))
         return
 
@@ -145,7 +123,7 @@ def deploy_tarball_to_s3(tarball_obj, bucket_name, prefix='', region='us-west-2'
             files_uploaded = 0
 
             # Parallelize the uploads so they don't take ages
-            pool = Pool(concurrency)
+            pool = ThreadPool(concurrency)
 
             # Iterate over the tarball's contents.
             try:
@@ -166,20 +144,21 @@ def deploy_tarball_to_s3(tarball_obj, bucket_name, prefix='', region='us-west-2'
                     fd = tarball.extractfile(member)
 
                     # Send a job to the pool.
-                    pool.wait_available()
-                    pool.apply_async(__deploy_asset_to_s3, (fd.read(), path, member.size, bucket, not no_compress))
+                    pool.apply_async(__deploy_asset_to_s3, (fd.read(), path, member.size, bucket_name, not no_compress))
 
                     files_uploaded += 1
 
                 # Wait for all transfers to finish
-                pool.join()
+                pool.close()
+                pool.join()  # Wait for all transfers to finish
 
             except KeyboardInterrupt:
                 # Ctrl-C pressed
                 print("Cancelling upload...")
-                pool.join()
-
+                pool.close()
             finally:
+                pool.close()
+                pool.join()  # Wait for all transfers to finish
                 print("Uploaded %i files" % (files_uploaded))
 
     except tarfile.ReadError:
@@ -209,7 +188,7 @@ def main():
     else:
         logging.basicConfig(level=logging.INFO)
 
-    with open(args.filename) as fd:
+    with open(args.filename, "rb") as fd:
         deploy_tarball_to_s3(fd, args.bucket, args.prefix, args.region, args.concurrency, args.no_compress, args.strip_components)
 
 
