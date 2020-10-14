@@ -22,7 +22,6 @@ Example::
 """
 from __future__ import print_function
 
-import threading
 import os
 import sys
 import mimetypes
