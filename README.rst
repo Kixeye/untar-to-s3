@@ -13,9 +13,6 @@ Requirements::
     Python 2.7 and above
     boto3 library (to install: sudo pip install boto3)
 
-Recommended::
-    gevent library to parallelize uploads to S3 (to install: sudo pip install gevent)
-
 For usage overview::
 
     python untar-to-s3.py -h
